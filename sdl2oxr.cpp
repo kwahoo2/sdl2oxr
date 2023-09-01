@@ -405,6 +405,7 @@ struct OpenXrExample {
         // Even preferable would be to create a swapchain texture array with one layer per eye, so that we could use the
         // VK_KHR_multiview to render both eyes with a single set of draws, but sadly the Oculus runtime doesn't currently
         // support texture array swapchains
+        // one swapchain per eye
         if (viewConfigViews.size() != 2) {
             throw std::runtime_error("Unexpected number of view configurations");
         }
@@ -413,7 +414,7 @@ struct OpenXrExample {
             throw std::runtime_error("Per-eye images have different recommended heights");
         }
 
-        renderTargetSize = { viewConfigViews[0].recommendedImageRectWidth * 2, viewConfigViews[0].recommendedImageRectHeight };
+        renderTargetSize = { viewConfigViews[0].recommendedImageRectWidth, viewConfigViews[0].recommendedImageRectHeight };
 
         graphicsRequirements = instance.getOpenGLGraphicsRequirementsKHR(systemId, dispatch);
     }
@@ -545,21 +546,27 @@ struct OpenXrExample {
     }
 
     xr::SwapchainCreateInfo swapchainCreateInfo;
-    xr::Swapchain swapchain;
-    std::vector<xr::SwapchainImageOpenGLKHR> swapchainImages;
+    std::vector<xr::Swapchain> swapchains; //one swapchain per eye
+    std::vector<std::vector<xr::SwapchainImageOpenGLKHR> > swapchainImagesArr; //two swapchain images (for both eyes)
     void prepareXrSwapchain() {
-        swapchainCreateInfo.usageFlags = xr::SwapchainUsageFlagBits::TransferDst;
-        swapchainCreateInfo.format = (int64_t)GL_SRGB8_ALPHA8;
-        swapchainCreateInfo.sampleCount = 1;
-        swapchainCreateInfo.arraySize = 1;
-        swapchainCreateInfo.faceCount = 1;
-        swapchainCreateInfo.mipCount = 1;
-        swapchainCreateInfo.width = renderTargetSize.x;
-        swapchainCreateInfo.height = renderTargetSize.y;
+        xr::for_each_side_index([&](uint32_t eyeIndex){
+            xr::Swapchain swapchain;
+            std::vector<xr::SwapchainImageOpenGLKHR> swapchainImages;
 
-        swapchain = session.createSwapchain(swapchainCreateInfo);
+            swapchainCreateInfo.usageFlags = xr::SwapchainUsageFlagBits::TransferDst;
+            swapchainCreateInfo.format = (int64_t)GL_SRGB8_ALPHA8;
+            swapchainCreateInfo.sampleCount = 1;
+            swapchainCreateInfo.arraySize = 1;
+            swapchainCreateInfo.faceCount = 1;
+            swapchainCreateInfo.mipCount = 1;
+            swapchainCreateInfo.width = renderTargetSize.x;
+            swapchainCreateInfo.height = renderTargetSize.y;
+            swapchain = session.createSwapchain(swapchainCreateInfo);
+            swapchainImages = swapchain.enumerateSwapchainImages<xr::SwapchainImageOpenGLKHR>();
 
-        swapchainImages = swapchain.enumerateSwapchainImages<xr::SwapchainImageOpenGLKHR>();
+            swapchains.push_back(swapchain);
+            swapchainImagesArr.push_back(swapchainImages);
+        });
     }
 
     std::array<xr::CompositionLayerProjectionView, 2> projectionLayerViews;
@@ -574,11 +581,9 @@ struct OpenXrExample {
         // Finish setting up the layer submission
         xr::for_each_side_index([&](uint32_t eyeIndex) {
             auto& layerView = projectionLayerViews[eyeIndex];
-            layerView.subImage.swapchain = swapchain;
-            layerView.subImage.imageRect.extent = { (int32_t)renderTargetSize.x / 2, (int32_t)renderTargetSize.y };
-            if (eyeIndex == 1) {
-                layerView.subImage.imageRect.offset.x = layerView.subImage.imageRect.extent.width;
-            }
+            layerView.subImage.swapchain = swapchains[eyeIndex];
+            layerView.subImage.imageRect.offset = {0, 0};
+            layerView.subImage.imageRect.extent = { (int32_t)renderTargetSize.x, (int32_t)renderTargetSize.y };
         });
     }
 
@@ -722,33 +727,40 @@ struct OpenXrExample {
     }
 
     void render() {
-        uint32_t swapchainIndex;
+        xr::for_each_side_index([&](uint32_t eyeIndex){
 
-        swapchain.acquireSwapchainImage(xr::SwapchainImageAcquireInfo{}, &swapchainIndex);
-        swapchain.waitSwapchainImage(xr::SwapchainImageWaitInfo{ xr::Duration::infinite() });
+            uint32_t swapchainIndex;
+            xr::Swapchain swapchain = swapchains[eyeIndex];
 
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo.id);
-        glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, swapchainImages[swapchainIndex].image, 0);
+            swapchain.acquireSwapchainImage(xr::SwapchainImageAcquireInfo{}, &swapchainIndex);
+            swapchain.waitSwapchainImage(xr::SwapchainImageWaitInfo{ xr::Duration::infinite() });
 
-        // "render" to the swapchain image
-        glEnable(GL_SCISSOR_TEST);
-        glScissor(0, 0, renderTargetSize.x / 2, renderTargetSize.y);
-        glClearColor(0, 1, 0, 1);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        glScissor(renderTargetSize.x / 2, 0, renderTargetSize.x / 2, renderTargetSize.y);
-        glClearColor(0, 0, 1, 1);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo.id);
+            //glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, swapchainImages[swapchainIndex].image, 0);
+            glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, swapchainImagesArr[eyeIndex][swapchainIndex].image, 0);
 
-        // fast blit from the fbo to the window surface
-        glDisable(GL_SCISSOR_TEST);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-        glBlitFramebuffer(0, 0, renderTargetSize.x, renderTargetSize.y, 0, 0, windowSize.x, windowSize.y, GL_COLOR_BUFFER_BIT,
-                          GL_NEAREST);
+            // "render" to the swapchain image
+            if (eyeIndex == 0)
+            {
+                glClearColor(0, 1, 0, 1);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);// draw once per eye - left
+            }
+            else
+            {
+                glClearColor(0, 0, 1, 1);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                // fast blit from the fbo to the window surface
+                /*glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+                glBlitFramebuffer(0, 0, renderTargetSize.x, renderTargetSize.y, 0, 0, windowSize.x, windowSize.y, GL_COLOR_BUFFER_BIT,
+                                GL_NEAREST);*/
 
-        glFramebufferTexture(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 0, 0);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+                glFramebufferTexture(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 0, 0);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+            }
 
-        swapchain.releaseSwapchainImage(xr::SwapchainImageReleaseInfo{});
+            swapchain.releaseSwapchainImage(xr::SwapchainImageReleaseInfo{});
+
+        });
 
         SDL_GL_SwapWindow(window);
     }
@@ -767,9 +779,12 @@ struct OpenXrExample {
             fbo.depthBuffer = 0;
         }
 
-        if (swapchain) {
-            swapchain.destroy();
-            swapchain = nullptr;
+        for (xr::Swapchain swapchain : swapchains) {
+            if (swapchain)
+            {
+                swapchain.destroy();
+                swapchain = nullptr;
+            }
         }
         if (session) {
             session.destroy();
