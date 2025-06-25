@@ -24,7 +24,7 @@ struct fmt::formatter<logging::Time> {
     }
 
     template <typename FormatContext>
-    auto format(const logging::Time& t, FormatContext& ctx) {
+    auto format(const logging::Time& t, FormatContext& ctx) const {
         auto now_ms = std::chrono::time_point_cast<std::chrono::milliseconds>(t);
         auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_ms.time_since_epoch()).count() % 1000;
         time_t tt = std::chrono::system_clock::to_time_t(t);
